@@ -3,19 +3,25 @@
 // What the dev window taught us (128k events, 1,222 coins): the average 100-slot
 // forward return is about -3% in every momentum and dip bucket EXCEPT the big
 // mature curves (real SOL 30-60), the only bucket with a positive mean (+1.2%).
-// Small young curves bleed; large survivors grind toward completion. So this bot
-// only buys curves that are already big and already old enough to have a readable
-// tape, and only when that tape is clean: several distinct non-creator buyers,
-// the creator still holding, buys outweighing sells, the price parked near its
-// early high, and fresh net inflow still positive. Size goes to the survivors:
-// 0.4 SOL first, one 0.2 SOL add into strength, at most 0.6 SOL per coin and four
-// momentum positions at once. No shorts, no leverage, no clock, no randomness.
+// Small young curves bleed; large survivors grind toward completion. Round 3
+// sharpened the same idea on the full 24h window: the rugs that killed round 2
+// (-0.78 SOL) all came from the smaller end of that bucket, and the winners
+// peaked and then faded instead of running to +35%. So this bot only buys
+// curves with real SOL 40-70 whose launch tape is still clean — several
+// distinct non-creator buyers, the creator still holding, buys outweighing
+// sells, the price parked near its early high, and fresh net inflow still
+// positive — and it banks the win at +20% instead of waiting for +35%.
+// Size goes to the survivors: 0.4 SOL first, one 0.2 SOL add into strength, at
+// most 0.6 SOL per coin and four momentum positions at once. No shorts, no
+// leverage, no clock, no randomness.
 //
-// Exits do the real work: take profit at +35%, stop loss at -5%, a trailing exit
+// Exits do the real work: take profit at +20%, stop loss at -5%, a trailing exit
 // once the peak clears +10%, an instant exit when the creator sells or one big
-// sell lands, a fade exit when recent net flow turns negative, a hard time limit,
-// and an exit as completion approaches. Positions may ride all the way into
-// completion, where the replay closes them at final reserves.
+// sell lands, a fade exit when recent net flow turns negative over a 75-slot
+// window (the 30-slot window cut winners mid-run; 75 gives a position room to
+// reach take-profit while still leaving when the flow truly turns), a hard
+// time limit, and an exit as completion approaches. Positions may ride all the
+// way into completion, where the replay closes them at final reserves.
 //
 // Guardrail probes keep the run above the minimum bar (round trips of >= 0.01 SOL
 // on >= 20 coins): when the bot's own fills or coins lag the pace set in block
@@ -25,11 +31,10 @@
 // in-memory journal (entries, adds, exits with their reason, probes), which the
 // backtest tool prints as a summary — useful for seeing which rule fires and
 // which one never does, without touching the graded behaviour. On the dev window
-// the journal shows where the edge actually lives: 7 entries and 3 adds, 9 exit
-// orders placed (4 on creator sell, 4 on fading flow, 1 on a big sell) —
-// take-profit, stop-loss and the trailing stop never fired. The tape filter, not
-// the exit ladder, is what keeps the run positive; the exits exist to cap the
-// damage when a tape goes bad.
+// the journal shows where the edge actually lives: 10 entries and 6 adds, 10 exit
+// orders placed (1 on a big sell, 2 on creator sell, 2 on fading flow, 1 on stop
+// loss, 4 on take profit) — the tape filter plus the early take-profit, not the
+// exit ladder alone, is what keeps the run positive.
 //
 // Deterministic by construction: no clock, no randomness, no I/O. Iteration is
 // only over insertion-ordered maps fed by the batch stream, so two graded runs
@@ -123,7 +128,7 @@ export interface Params {
 export const DEFAULT_PARAMS: Params = {
   minAge: 3,
   maxAge: 100000,
-  minRqSol: 30,
+  minRqSol: 40,
   maxRqSol: 70,
   minBuyers: 3,
   minBuys: 4,
@@ -145,11 +150,11 @@ export const DEFAULT_PARAMS: Params = {
   maxAdds: 1,
   minBuySol: 0.01,
   buySlipBps: 1500,
-  takeProfit: 0.35,
+  takeProfit: 0.2,
   stopLoss: 0.05,
   trailArm: 0.1,
   trail: 0.1,
-  fadeWindow: 30,
+  fadeWindow: 75,
   fadeNetSol: 0.4,
   bigSellSol: 1.5,
   maxHold: 5000,
