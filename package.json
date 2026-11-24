@@ -1,0 +1,1 @@
+{"description":"Paper trading bot for the Pump.fun Replay Sprint on make.fun — early-momentum sniper on 24h of pump.fun bonding-curve replays.","engines":{"node":">=22.18"},"license":"MIT","main":"main.ts","name":"pump-replay-bot","scripts":{"backtest":"node tools/backtest.ts","start":"node main.ts"},"type":"module","version":"1.0.0"}
