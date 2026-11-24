@@ -1,16 +1,18 @@
 # Pump Replay Bot
 
-[![make.fun](https://make.fun/badge/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122.svg)](https://make.fun/c/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122/)
-[![rank](https://make.fun/badge/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122/anisakansa/pump-replay-bot/rank.svg)](https://make.fun/c/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122/)
-[![reward](https://make.fun/badge/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122/anisakansa/pump-replay-bot/reward.svg)](https://make.fun/c/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122/)
+[![make.fun](https://make.fun/badge/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122.svg)](https://make.fun/bounty/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122)
+[![rank](https://make.fun/badge/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122/anisakansa/pump-replay-bot/rank.svg)](https://make.fun/bounty/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122)
+[![reward](https://make.fun/badge/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122/anisakansa/pump-replay-bot/reward.svg)](https://make.fun/bounty/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122)
 
-Paper trading bot for the [Pump.fun Replay Sprint — Paper Bot, Real Ranking](https://make.fun/c/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122/) bounty on [make.fun](https://make.fun). It trades 10 SOL of paper money on a 24h replay of pump.fun bonding-curve activity (TradeEvent / CreateEvent / CompleteEvent), scored by net PnL.
+Paper trading bot for the [Pump.fun Replay Sprint — Paper Bot, Real Ranking](https://make.fun/bounty/u-jackxyz72-pump-fun-replay-sprint-paper-bot-0b809122) bounty on [make.fun](https://make.fun). It trades 10 SOL of paper money on a 24h replay of pump.fun bonding-curve activity (TradeEvent / CreateEvent / CompleteEvent), scored by net PnL.
 
 ## Strategy
 
-Buy mature, large bonding curves only (real SOL 30–70) after a clean tape: several distinct non-creator buyers, no creator sell, buys outweighing sells, price near its early high, fresh net inflow positive. The dev-window data says small young curves bleed on average while large survivors grind up toward completion, so size goes to the survivors: up to 0.6 SOL per coin, one add into strength, at most 5 open positions, no shorts, no leverage.
+Buy mature, large bonding curves only (real SOL 30–70) after a clean tape: several distinct non-creator buyers, no creator sell, buys outweighing sells, price near its early high, fresh net inflow positive — and the recent flow must come from more than one buyer, so a single wallet washing the tape does not count as demand. The dev-window data says small young curves bleed on average while large survivors grind up toward completion, so size goes to the survivors: up to 0.6 SOL per coin, one add into strength, at most 5 open positions, no shorts, no leverage.
 
-Exits are disciplined: take profit +35%, stop loss −5%, trailing stop once the peak clears +10%, immediate exit on creator sell or a single large sell, fade exit on negative recent flow, hard time limit. Positions may ride into completion (closed by the replay at final reserves). Tiny 0.01 SOL probe round trips keep the guardrail bar (≥20 coins) covered when the main signal is quiet.
+Exits are disciplined: take profit +35%, stop loss −5%, trailing stop once the peak clears +10%, immediate exit on creator sell or a single large sell, fade exit on negative recent flow, hard time limit. Positions may ride into completion (closed by the replay at final reserves). Tiny 0.01 SOL probe round trips keep the guardrail bar (≥20 coins) covered when the main signal is quiet; probes are paced per mint and capped in total spend so the guardrail never turns into a leak.
+
+Every decision the bot makes is written to an in-memory journal (entries, adds, exits with their reason, probes), which the backtest prints as a summary — so you can see which rule fires and which one never does. Stale tapes of completed curves are swept a bounded slice per batch, keeping memory flat without touching behaviour.
 
 ## Local backtest (dev window)
 
@@ -18,7 +20,7 @@ Exits are disciplined: take profit +35%, stop loss −5%, trailing stop once the
 node tools/backtest.ts <kit dir>
 ```
 
-Result on the kit's dev window: **net +0.143834 SOL**, 71 fills, 29 coins, 34 round trips, 5 wins, max drawdown 0.0072, 0 rejected orders. At 2x fees still +0.039185 SOL. Two runs produce byte-identical output (sha256 `afe3ad33138b8c9df8d7bcfc3581e5c017c698bffeedfb8f22d061a36be44e87`).
+Result on the kit's dev window: **net +0.143834 SOL**, 71 fills, 29 coins, 34 round trips, 5 wins, max drawdown 0.0072, 0 rejected orders. At 2x fees still +0.039185 SOL. Two runs produce byte-identical stdout (sha256 `64f03e4206fe6cd0ac1e3a6ca6b175adee12d9ac97fff02a0d8ef6f43eaaa8f2`). Decision journal on that run: enter 7, add 3, probe-buy 28, probe-sell 27, exit-dev 4, exit-fade 4, exit-bigsell 1 — take-profit, stop-loss and trailing never fired.
 
 ## Run
 
@@ -30,10 +32,10 @@ Node 22.18+ required (uses TypeScript type stripping). No dependencies, no netwo
 
 ## Files
 
-- `main.ts` — entrypoint: runs the strategy through the replay harness.
-- `strategy.ts` — the trading strategy (entry signal, exits, probes).
+- `main.ts` — entrypoint: validates the params, runs the strategy through the replay harness.
+- `strategy.ts` — the trading strategy (entry signal, exits, probes, decision journal).
 - `vendor/agentfun-bot.ts` — harness SDK shim (kit-provided).
-- `tools/backtest.ts`, `tools/sim.ts` — offline backtest on the dev window.
+- `tools/backtest.ts`, `tools/sim.ts` — offline backtest on the dev window, with a guardrail verdict and decision summary.
 
 ## License
 
