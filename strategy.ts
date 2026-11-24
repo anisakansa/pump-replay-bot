@@ -196,6 +196,17 @@ interface CurveTape {
   creatorSold: boolean;
   buySol: number;
   sellSol: number;
+  /**
+   * All-time tape aggregates, maintained incrementally as trades arrive so
+   * the entry signal never has to rescan the tape: the highest price any
+   * trade printed, the count of buys, and the per-user buy SOL of
+   * non-creator buyers with the largest single buyer. They are cumulative,
+   * so dropping old trades from `trades` never invalidates them.
+   */
+  high: number;
+  buys: number;
+  buySolByUser: Map<string, number>;
+  biggestBuyer: number;
 }
 
 /** A momentum position the bot currently holds. */
@@ -253,11 +264,17 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot & StrategyReport
   const ownCoins = new Set<Pubkey>();
   let firstBlockTime: number | null = null;
   let lastBlockTime: number | null = null;
-  /** Rotating cursor for the stale-tape sweeper (insertion order => deterministic). */
-  let pruneCursor = 0;
+  /** Persistent iterator for the stale-tape sweeper (insertion order => deterministic). */
+  let pruneIter: Iterator<Pubkey> | null = null;
   const journal: Decision[] = [];
-  /** Trades older than this are dropped; long enough for every window we read. */
-  const keepSlots = Math.max(p.maxAge, p.flowWindow, p.fadeWindow) + 10;
+  /**
+   * Trades older than this are dropped; long enough for every window we read
+   * (the recent-flow windows). The entry signal reads its all-time tape
+   * aggregates (maintained incrementally on ingest), never the trade list,
+   * so nothing needs the full history retained: keeping only the recent
+   * window bounds the tape's memory and the GC work per batch.
+   */
+  const keepSlots = Math.max(p.flowWindow, p.fadeWindow) + 10;
 
   const tapeFor = (mint: Pubkey): CurveTape => {
     let t = tapes.get(mint);
@@ -273,6 +290,10 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot & StrategyReport
         creatorSold: false,
         buySol: 0,
         sellSol: 0,
+        high: 0,
+        buys: 0,
+        buySolByUser: new Map<string, number>(),
+        biggestBuyer: 0,
       };
       tapes.set(mint, t);
     }
@@ -324,23 +345,15 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot & StrategyReport
     const runup = price / t.createPrice;
     if (runup < p.minRunup || runup > p.maxRunup) return false;
 
-    let high = 0;
-    let buys = 0;
-    const buySolByUser = new Map<string, number>();
-    for (const tr of t.trades) {
-      if (tr.price > high) high = tr.price;
-      if (tr.buy) {
-        buys++;
-        if (tr.user !== t.creator) {
-          buySolByUser.set(tr.user, (buySolByUser.get(tr.user) ?? 0) + tr.sol);
-        }
-      }
-    }
-    if (buys < p.minBuys || buySolByUser.size < p.minBuyers) return false;
-    if (high > 0 && price < high * p.nearHigh) return false;
-    let biggestBuyer = 0;
-    for (const v of buySolByUser.values()) if (v > biggestBuyer) biggestBuyer = v;
-    if (biggestBuyer > p.maxBuyerShare * t.buySol) return false;
+    // The tape aggregates are maintained incrementally on ingest, so this
+    // reads O(1) state instead of rescanning the whole trade history on
+    // every candidate evaluation. The values are exactly the ones the
+    // scan computed: buys counts every buy, buySolByUser holds non-creator
+    // buyers only, high is the max price of any trade, biggestBuyer the
+    // largest single non-creator buyer.
+    if (t.buys < p.minBuys || t.buySolByUser.size < p.minBuyers) return false;
+    if (t.high > 0 && price < t.high * p.nearHigh) return false;
+    if (t.biggestBuyer > p.maxBuyerShare * t.buySol) return false;
 
     // The tape must still be alive right now, not just historically busy:
     // positive net flow, enough recent buys, and more than one recent buyer
@@ -427,6 +440,18 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot & StrategyReport
           const sol = Number(e.sol_amount) / LAMPORTS;
           const price = Number(e.virtual_quote_reserves) / Number(e.virtual_token_reserves);
           t.trades.push({ slot: e.slot, buy: e.is_buy, sol, user: e.user, price });
+          // Maintain the all-time tape aggregates incrementally: the entry
+          // signal reads these instead of rescanning the trade list.
+          if (price > t.high) t.high = price;
+          if (e.is_buy) {
+            t.buys++;
+            if (e.user !== t.creator) {
+              const prev = t.buySolByUser.get(e.user) ?? 0;
+              const nv = prev + sol;
+              t.buySolByUser.set(e.user, nv);
+              if (nv > t.biggestBuyer) t.biggestBuyer = nv;
+            }
+          }
           if (e.is_buy) {
             t.buySol += sol;
             if (e.user === t.creator) t.creatorBuySol += sol;
@@ -448,30 +473,45 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot & StrategyReport
       }
 
       // Sweep a bounded slice of tapes each batch and drop the ones belonging
-      // to completed curves with no recent trades. Insertion order makes the
-      // sweep deterministic; the bound keeps the work per batch constant.
+      // to completed curves with no recent trades. A persistent iterator
+      // walks the map in insertion order (deterministic) without
+      // materialising the whole key array on every batch; the bound keeps
+      // the work per batch constant. Visiting a tape also drops its stale
+      // trades, so a curve that stops trading does not keep its history
+      // in memory forever.
       {
-        const keys = [...tapes.keys()];
-        const n = keys.length;
-        if (n > 0) {
-          for (let i = 0; i < PRUNE_PER_BATCH; i++) {
-            const mint = keys[(pruneCursor + i) % n]!;
-            const t = tapes.get(mint);
-            if (t === undefined) continue;
-            const curve = state.curves.get(mint);
-            const lastTrade = t.trades[t.trades.length - 1];
-            if (curve !== undefined && curve.complete && (lastTrade === undefined || lastTrade.slot <= now - keepSlots)) {
-              tapes.delete(mint);
-            }
+        if (pruneIter === null) pruneIter = tapes.keys();
+        for (let i = 0; i < PRUNE_PER_BATCH; i++) {
+          const next = pruneIter.next();
+          if (next.done) {
+            pruneIter = tapes.keys();
+            break;
           }
-          pruneCursor = (pruneCursor + PRUNE_PER_BATCH) % n;
+          const mint = next.value;
+          const t = tapes.get(mint);
+          if (t === undefined) continue;
+          let cut = 0;
+          while (cut < t.trades.length && t.trades[cut]!.slot <= now - keepSlots) cut++;
+          if (cut > 0) t.trades.splice(0, cut);
+          const curve = state.curves.get(mint);
+          const lastTrade = t.trades[t.trades.length - 1];
+          if (curve !== undefined && curve.complete && (lastTrade === undefined || lastTrade.slot <= now - keepSlots)) {
+            tapes.delete(mint);
+          }
         }
       }
 
-      const marks = new Map(batch.marks.map((m) => [m.mint, m] as const));
+      // Marks arrive for held and pending mints only, so a linear scan is
+      // cheaper than building a Map on every batch.
+      const markFor = (mint: Pubkey) => {
+        for (const m of batch.marks) if (m.mint === mint) return m;
+        return undefined;
+      };
       const pendingByMint = new Map<Pubkey, number>();
+      const pendingSell = new Set<Pubkey>();
       for (const po of state.pending.values()) {
         pendingByMint.set(po.order.mint, (pendingByMint.get(po.order.mint) ?? 0) + 1);
+        if (po.order.side === 'sell') pendingSell.add(po.order.mint);
       }
 
       const orders: OrderInput[] = [];
@@ -495,7 +535,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot & StrategyReport
         }
         h.filled = true;
         if (curve === undefined || curve.complete) continue;
-        const mk = marks.get(mint);
+        const mk = markFor(mint);
         const vq = mk ? Number(mk.virtual_quote_reserves) : Number(curve.virtual_quote_reserves);
         const vt = mk ? Number(mk.virtual_token_reserves) : Number(curve.virtual_token_reserves);
         const rqSol = (mk ? Number(mk.real_quote_reserves) : Number(curve.real_quote_reserves)) / LAMPORTS;
@@ -515,13 +555,7 @@ export function createStrategy(p: Params = DEFAULT_PARAMS): Bot & StrategyReport
           h.exitKind = reason;
         }
         h.exiting = true;
-        if (pendingByMint.has(mint)) {
-          let sellPending = false;
-          for (const po of state.pending.values()) {
-            if (po.order.mint === mint && po.order.side === 'sell') sellPending = true;
-          }
-          if (sellPending) continue;
-        }
+        if (pendingSell.has(mint)) continue;
         if (orders.length >= cap) break;
         orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: SELL_SLIPPAGE_BPS });
         note(reason, now, mint, valueSol);
